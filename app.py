@@ -1,17 +1,13 @@
-from flask import Flask, request, send_file, render_template_string 
+from flask import Flask, request, send_file, render_template_string
 import pyperclip
-from icalendar import Calendar,Event, vText
+from icalendar import Calendar, Event, vText
 import datetime
 import re
 import os
 from dateutil import parser
 import io
 
-app= Flask(__name__)
-
-import datetime
-from dateutil import parser
-import re
+app = Flask(__name__)
 
 def parse_event_from_text(text_content):
     title = "新しいカレンダーイベント"
@@ -262,7 +258,8 @@ def generate_ical():
         return "テキストが入力されてません",400
     
     try:
-        title, start_dt, description, location = parse_event_from_text(event_text)
+        # ここを修正します！ duration を受け取る変数を追加
+        title, start_dt, duration_str, description, location = parse_event_from_text(event_text)
 
         cal= Calendar()
         cal.add('prodid', '-// My Python Calender Helper Web//example.com//')
@@ -271,11 +268,34 @@ def generate_ical():
         event=Event()
         event.add('summary', vText(title))
         event.add('dtstart', start_dt)
-        event.add('dtend', start_dt + datetime.timedelta(hours=1)) # デフォルトで1時間後
         event.add('description', vText(description))
         if location:
             event.add('location', vText(location))
         event.add('priority', 5)
+
+        # duration_str があれば dtend を計算して追加
+        if duration_str:
+            total_seconds = 0
+            days_match = re.search(r'(\d+)d', duration_str)
+            if days_match:
+                total_seconds += int(days_match.group(1)) * 24 * 3600
+            hours_match = re.search(r'(\d+)h', duration_str)
+            if hours_match:
+                total_seconds += int(hours_match.group(1)) * 3600
+            minutes_match = re.search(r'(\d+)m', duration_str)
+            if minutes_match:
+                total_seconds += int(minutes_match.group(1)) * 60
+            seconds_match = re.search(r'(\d+)s', duration_str)
+            if seconds_match:
+                total_seconds += int(seconds_match.group(1))
+
+            if total_seconds > 0:
+                event.add('dtend', start_dt + datetime.timedelta(seconds=total_seconds))
+            else: # duration_str があったが解析結果が0秒の場合、デフォルト1時間
+                event.add('dtend', start_dt + datetime.timedelta(hours=1))
+        else: # duration_str がそもそもない場合、デフォルト1時間
+            event.add('dtend', start_dt + datetime.timedelta(hours=1))
+
 
         cal.add_component(event)
 
@@ -299,5 +319,3 @@ if __name__=='__main__':
     #ファイアウォールやルータの設定でポート（デフォルト5000）を開くことが必要かも
     app.run(debug=True, host='0.0.0.0',port=5001)
     #ホストをこの番号にするとローカルネットワーク内の他のデバイスからアクセス可能になる
-
-
