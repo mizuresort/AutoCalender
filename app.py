@@ -9,31 +9,73 @@ import io
 
 app= Flask(__name__)
 
+import datetime
+from dateutil import parser
+import re
+
 def parse_event_from_text(text_content):
-    """
-    テキストコンテンツからイベント情報を解析します。
-    この部分は、ユーザーがコピーするテキストの形式に合わせて調整が必要です。
-    """
     title = "新しいカレンダーイベント"
-    start_dt = datetime.datetime.now()
-    description = text_content
     location = ""
+    duration = None # 新しくdurationを追加
 
-    # 1. 日付の解析 (dateutil.parser を使用すると柔軟性が高い)
-    try:
-        # 例: "2025年7月1日", "来週月曜日", "明日", "7/1" など
-        # 'fuzzy=True' で、日付以外の文字列も含むテキストから日付を抽出試行
-        parsed_date = parser.parse(text_content, fuzzy=True, dayfirst=False, yearfirst=True)
-        start_dt = start_dt.replace(year=parsed_date.year, month=parsed_date.month, day=parsed_date.day)
-    except parser.ParserError:
-        pass # 日付が見つからない場合は現在の日のまま
+    now = datetime.datetime.now()
+    # デフォルトの開始日時を、現在の日付の午前9時に設定
+    # もし現在時刻が午前9時を過ぎていたら、翌日の午前9時にする
+    default_start_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if now.hour >= 9:
+        default_start_dt += datetime.timedelta(days=1)
+    
+    start_dt = default_start_dt # 初期値を設定
 
-    # 2. 時刻の解析 (日付が見つかった場合、その日の時刻として解析)
+    # --- 1. 日付の解析 ---
+    # まずはYYYY/MM/DD, MM/DD, YYYY年MM月DD日 などの日付パターンを抽出
+    date_patterns = [
+        r'(\d{4}[/\-年]\d{1,2}[/\-月]\d{1,2}日?)', # YYYY/MM/DD or YYYY-MM-DD
+        r'(\d{1,2}[/\-月]\d{1,2}日?)',          # MM/DD or MM-DD
+        r'(\d{1,2}月\d{1,2}日)',                # MM月DD日
+    ]
+    
+    found_date_in_text = False
+    for pattern in date_patterns:
+        date_match = re.search(pattern, text_content)
+        if date_match:
+            date_str = date_match.group(1)
+            try:
+                # MM/DD 形式の場合は dayfirst=False を優先
+                if re.match(r'\d{1,2}[/\-月]\d{1,2}日?', date_str):
+                    parsed_dt = parser.parse(date_str, dayfirst=False, fuzzy=True)
+                else:
+                    parsed_dt = parser.parse(date_str, fuzzy=True) # その他の形式はデフォルトで
+                
+                # 解析された日付でstart_dtの日付部分を更新
+                start_dt = start_dt.replace(year=parsed_dt.year, 
+                                            month=parsed_dt.month, 
+                                            day=parsed_dt.day)
+                found_date_in_text = True
+                break # 最初に見つかった日付を採用
+            except parser.ParserError:
+                continue # 解析失敗したら次のパターンを試す
+    
+    # 相対日付の処理 (もし上記で日付が見つからなければ)
+    if not found_date_in_text:
+        if "明日" in text_content:
+            start_dt = now + datetime.timedelta(days=1)
+            start_dt = start_dt.replace(hour=default_start_dt.hour, minute=default_start_dt.minute, second=0, microsecond=0)
+            found_date_in_text = True
+        elif "明後日" in text_content:
+            start_dt = now + datetime.timedelta(days=2)
+            start_dt = start_dt.replace(hour=default_start_dt.hour, minute=default_start_dt.minute, second=0, microsecond=0)
+            found_date_in_text = True
+        elif "今日" in text_content:
+            start_dt = now.replace(hour=default_start_dt.hour, minute=default_start_dt.minute, second=0, microsecond=0)
+            found_date_in_text = True
+        # "昨日" や "一昨日" はカレンダー作成では通常使わないため、ここでは含めません。
+
+    # --- 2. 時刻の解析 ---
     time_match = re.search(r'(\d{1,2}:\d{2}(?:[APap][Mm])?|\d{1,2}時\d{2}分?|\d{1,2}時)', text_content)
     if time_match:
         try:
             time_str = time_match.group(1).replace('時', ':').replace('分', '')
-            # AM/PMを含む場合の処理
             if 'am' in time_str.lower() or 'pm' in time_str.lower():
                 parsed_time = datetime.datetime.strptime(time_str, '%I:%M%p').time()
             elif ':' in time_str:
@@ -41,51 +83,141 @@ def parse_event_from_text(text_content):
             else: # 例: "10時" の場合
                 parsed_time = datetime.datetime.strptime(time_str + ':00', '%H:%M').time()
 
+            # 時刻が見つかった場合は、解析された時刻でstart_dtの時刻部分を更新
             start_dt = start_dt.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
 
-            # もし解析された時刻が現在時刻より過去で、かつ日付が今日の場合、翌日にする（午前/午後が不明な場合など）
+            # もし解析された日時が現在時刻より過去で、かつ日付が今日の場合、翌日にする
+            # (これは元のロジックを維持。テキストに例えば「9時」とだけあり、現在が10時の場合、翌日の9時にする)
             if start_dt < datetime.datetime.now() and start_dt.date() == datetime.datetime.now().date():
                 start_dt += datetime.timedelta(days=1)
 
         except ValueError:
-            pass # 解析失敗時はデフォルト値を使用
+            pass # 解析失敗時は設定済みのstart_dt (デフォルトまたは日付解析結果) を使用
 
-    # 3. タイトルの解析 (最も重要な情報)
-    # 例: "〇〇と打ち合わせ", "〇〇会議", "〇〇の予約" など
-    # ここは非常にカスタマイズが必要です。
-    # 簡単な例として、日付や時刻の前後にあるキーワードをタイトルとする
-    # あるいは、特定のキーワード（例: "会議", "打ち合わせ", "予約"）を見つけて、その前後のテキストをタイトルとする
-    title_keywords = ["会議", "打ち合わせ", "ミーティング", "予約", "イベント", "リマインダー"]
-    found_title = False
+    # --- 3. 期間の解析 (duration) ---
+    end_dt = None
+    # 例: "7/1~7/2 10:00~12:00" のような形式を解析
+    # 日付範囲と時刻範囲の抽出
+    # 複数のパターンを試す
+    datetime_range_patterns = [
+        r'(\d{1,2}[/\-月]\d{1,2}日?)~?(\d{1,2}[/\-月]\d{1,2}日?)?\s*(\d{1,2}:\d{2})~?(\d{1,2}:\d{2})?', # 7/1~7/2 10:00~12:00
+        r'(\d{1,2}:\d{2})~?(\d{1,2}:\d{2})?', # 10:00~12:00 (同日内)
+        r'(\d{1,2}[/\-月]\d{1,2}日?)~?(\d{1,2}[/\-月]\d{1,2}日?)', # 7/1~7/2 (終日イベント)
+    ]
+
+    for pattern in datetime_range_patterns:
+        datetime_range_match = re.search(pattern, text_content)
+        if datetime_range_match:
+            try:
+                # グループの取得と整形
+                g = datetime_range_match.groups()
+                
+                # 開始日時を再確認 (既にstart_dtで解析済みだが、期間解析でより正確な情報が得られる場合があるため)
+                # グループの数でどのパターンにマッチしたか判断
+                if len(g) >= 4 and g[0] and g[2]: # 7/1~7/2 10:00~12:00 のようなパターン
+                    start_date_str = g[0]
+                    start_time_str = g[2]
+                    parsed_start_dt_from_range = parser.parse(start_date_str + " " + start_time_str, dayfirst=False, fuzzy=True)
+                    start_dt = start_dt.replace(year=parsed_start_dt_from_range.year,
+                                                month=parsed_start_dt_from_range.month,
+                                                day=parsed_start_dt_from_range.day,
+                                                hour=parsed_start_dt_from_range.hour,
+                                                minute=parsed_start_dt_from_range.minute,
+                                                second=0, microsecond=0)
+                elif len(g) >= 2 and g[0] and not g[1]: # 10:00~12:00 のような時刻のみのパターン
+                    start_time_str = g[0]
+                    parsed_start_time = datetime.datetime.strptime(start_time_str, '%H:%M').time()
+                    start_dt = start_dt.replace(hour=parsed_start_time.hour, minute=parsed_start_time.minute, second=0, microsecond=0)
+                    # 時刻が過去なら翌日にするロジックは、上記時刻解析部分で既に考慮済み
+
+                # 終了日時の解析
+                if len(g) >= 4 and g[1] and g[3]: # 7/1~7/2 10:00~12:00 のようなパターン
+                    end_date_str = g[1]
+                    end_time_str = g[3]
+                    parsed_end_dt = parser.parse(end_date_str + " " + end_time_str, dayfirst=False, fuzzy=True)
+                    # もし終了日が開始日より前なら、終了日を翌年に調整など
+                    if parsed_end_dt < start_dt:
+                        parsed_end_dt = parsed_end_dt.replace(year=start_dt.year + 1) # 簡単な調整
+                    end_dt = parsed_end_dt
+                elif len(g) >= 2 and g[1] and not g[0]: # 10:00~12:00 のような時刻のみのパターン
+                    end_time_str = g[1]
+                    parsed_end_time = datetime.datetime.strptime(end_time_str, '%H:%M').time()
+                    end_dt = start_dt.replace(hour=parsed_end_time.hour, minute=parsed_end_time.minute, second=0, microsecond=0)
+                    if end_dt < start_dt: # 例: 10:00~09:00 の場合
+                        end_dt += datetime.timedelta(days=1)
+                elif len(g) >= 2 and g[1] and not g[2]: # 7/1~7/2 のような日付のみのパターン (終日イベント)
+                    end_date_str = g[1]
+                    parsed_end_dt = parser.parse(end_date_str, dayfirst=False, fuzzy=True)
+                    end_dt = parsed_end_dt.replace(hour=23, minute=59, second=59) # 終日の場合、終了日の終わりに設定
+                    if end_dt < start_dt:
+                        end_dt = end_dt.replace(year=start_dt.year + 1)
+
+                if end_dt:
+                    time_delta = end_dt - start_dt
+                    total_seconds = int(time_delta.total_seconds())
+                    
+                    # durationは最低1分を設定
+                    if total_seconds <= 0:
+                        duration = "1m"
+                    else:
+                        days = total_seconds // (24 * 3600)
+                        hours = (total_seconds % (24 * 3600)) // 3600
+                        minutes = (total_seconds % 3600) // 60
+                        seconds = total_seconds % 60
+                        
+                        duration_parts = []
+                        if days > 0: duration_parts.append(f"{days}d")
+                        if hours > 0: duration_parts.append(f"{hours}h")
+                        if minutes > 0: duration_parts.append(f"{minutes}m")
+                        if seconds > 0: duration_parts.append(f"{seconds}s")
+                        
+                        duration = "".join(duration_parts)
+                
+                break # 期間解析に成功したらループを抜ける
+
+            except Exception as e:
+                # print(f"Duration parsing error: {e}") # デバッグ用
+                duration = None # 解析失敗時は期間なし
+                continue # 次のパターンを試す
+
+    # 4. タイトルの解析 (最も重要な情報)
+    # 日時や期間情報を削除してからタイトルを抽出
+    cleaned_text_for_title = text_content
+    # 日時範囲の正規表現パターンを結合して一度に削除
+    all_datetime_patterns_for_removal = r'|'.join([p.replace('(', '(?:') for p in date_patterns + datetime_range_patterns])
+    cleaned_text_for_title = re.sub(all_datetime_patterns_for_removal, '', cleaned_text_for_title).strip()
+    
+    title_keywords = ["会議", "打ち合わせ", "ミーティング", "予約", "イベント", "リマインダー", "予定"] # 「予定」も追加
+    found_title_from_keyword = False
     for keyword in title_keywords:
-        if keyword in text_content:
-            # キーワードの前の部分をタイトルにする（簡易的）
-            parts = text_content.split(keyword, 1)
+        if keyword in cleaned_text_for_title:
+            # キーワードより前の部分をタイトルにする
+            parts = cleaned_text_for_title.split(keyword, 1)
             if parts[0].strip():
-                title = parts[0].strip() + keyword
-            else: # キーワードが先頭に近い場合など
-                title = text_content.replace('\n', ' ')[:100] # 長すぎないように
-            found_title = True
+                title = parts[0].strip() # キーワード自体はタイトルに含めない
+            else: # キーワードが先頭にある場合など
+                title = keyword # キーワード自体をタイトルにする
+            found_title_from_keyword = True
             break
     
-    if not found_title:
-        # 日付や時刻の文字列を除去して残りをタイトルにする（より高度な方法）
-        cleaned_text = re.sub(r'(\d{4}[年/]\d{1,2}[月/]\d{1,2}日?|\d{1,2}:\d{2}(?:[APap][Mm])?|\d{1,2}時\d{2}分?|\d{1,2}時)', '', text_content)
+    if not found_title_from_keyword:
+        # 日時情報などを取り除いた残りのテキストをタイトルにする
+        cleaned_text = re.sub(r'(\d{4}[年/]\d{1,2}[/\-月]\d{1,2}日?|\d{1,2}[/\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日|今日|明日|明後日|昨日|一昨日|\d{1,2}:\d{2}(?:[APap][Mm])?|\d{1,2}時\d{2}分?|\d{1,2}時|\d{1,2}[/\-月]\d{1,2}日?~?\d{1,2}[/\-月]\d{1,2}日?\s*\d{1,2}:\d{2}~?\d{1,2}:\d{2})', '', text_content)
         cleaned_text = cleaned_text.replace('\n', ' ').strip()
         if cleaned_text:
             title = cleaned_text[:100] + '...' if len(cleaned_text) > 100 else cleaned_text
         else:
             title = "クリップボードからのイベント"
 
-    # 4. 説明 (残りのテキスト全て、または特定の情報)
-    description = text_content
+    # 5. 説明 (残りのテキスト全て、または特定の情報)
+    description = text_content # 全体を説明とする
 
-    # 5. 場所の解析 (例: "場所：〇〇", "@〇〇" など)
+    # 6. 場所の解析 (例: "場所：〇〇", "@〇〇" など)
     location_match = re.search(r'(場所|@|にて)[:：]?\s*(.+?)(?=\n|$)', text_content)
     if location_match:
         location = location_match.group(2).strip()
 
-    return title, start_dt, description, location
+    return title, start_dt, duration, description, location
 
 #webアプリのルートを定義
 
