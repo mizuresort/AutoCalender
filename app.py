@@ -176,34 +176,72 @@ def parse_event_from_text(text_content):
                 duration = None # 解析失敗時は期間なし
                 continue # 次のパターンを試す
 
-    # 4. タイトルの解析 (最も重要な情報)
+# 4. タイトルの解析 (最も重要な情報)
     # 日時や期間情報を削除してからタイトルを抽出
     cleaned_text_for_title = text_content
-    # 日時範囲の正規表現パターンを結合して一度に削除
-    all_datetime_patterns_for_removal = r'|'.join([p.replace('(', '(?:') for p in date_patterns + datetime_range_patterns])
-    cleaned_text_for_title = re.sub(all_datetime_patterns_for_removal, '', cleaned_text_for_title).strip()
+
+    # 最も長い/複雑な日時パターンから順に削除を試みる
+    # datetime_range_patterns を優先的に削除
+    for pattern in datetime_range_patterns:
+        cleaned_text_for_title = re.sub(pattern, '', cleaned_text_for_title).strip()
     
-    title_keywords = ["会議", "打ち合わせ", "ミーティング", "予約", "イベント", "リマインダー", "予定"] # 「予定」も追加
+    # その後、通常の date_patterns と time_match のパターンを削除
+    for pattern in date_patterns:
+        cleaned_text_for_title = re.sub(pattern, '', cleaned_text_for_title).strip()
+
+    # 時刻パターンも別途削除 (time_match の正規表現)
+    time_only_pattern = r'(\d{1,2}:\d{2}(?:[APap][Mm])?|\d{1,2}時\d{2}分?|\d{1,2}時)'
+    cleaned_text_for_title = re.sub(time_only_pattern, '', cleaned_text_for_title).strip()
+
+    # 句読点や不要な記号を削除（オプション、よりタイトルをきれいにしたい場合）
+    cleaned_text_for_title = re.sub(r'[~、,]', '', cleaned_text_for_title).strip()
+
+
+    title_keywords = ["会議", "打ち合わせ", "ミーティング", "予約", "イベント", "リマインダー", "予定", "休み"] # 「休み」も追加
     found_title_from_keyword = False
     for keyword in title_keywords:
         if keyword in cleaned_text_for_title:
-            # キーワードより前の部分をタイトルにする
-            parts = cleaned_text_for_title.split(keyword, 1)
+            # キーワードより前の部分をタイトルにする（ただし、既にクリーンアップされているはずなので、キーワードを含む部分を直接利用）
+            title_candidate = cleaned_text_for_title
+            
+            # キーワードが複数回含まれる場合もあるが、最初のキーワードに注目
+            parts = title_candidate.split(keyword, 1)
             if parts[0].strip():
-                title = parts[0].strip() # キーワード自体はタイトルに含めない
-            else: # キーワードが先頭にある場合など
+                # キーワードより前のテキストがあれば、それをタイトルにし、キーワードは含まない
+                title = parts[0].strip()
+            else:
+                # キーワードが先頭にあるか、キーワードのみの場合
                 title = keyword # キーワード自体をタイトルにする
+            
+            # もしキーワードが「夏休み」のように複合語の一部なら、その複合語全体を拾うロジックも必要
+            # 一旦、シンプルにキーワードが見つかったら、残りのテキストからキーワードを削除したものをタイトルとする
+            final_title = cleaned_text_for_title.replace(keyword, '').strip()
+            if final_title:
+                title = final_title
+            else:
+                title = keyword # 日時情報以外に何も残らなかったらキーワード自体をタイトルに
+
+            # ただし、「夏休み」のような場合は「夏休み」自体がタイトル
+            # ここはもっとスマートにする必要がある
+            # シンプルに「夏休み」のようなキーワードが見つかったらそれをタイトルにする
+            if keyword in ["夏休み", "冬休み", "春休み", "連休"]: # 例外的にキーワード自体がタイトルになるケース
+                title = keyword
+            elif final_title:
+                title = final_title
+            else:
+                title = text_content.replace('\n', ' ').strip()[:100] # 最悪元のテキストから
+
             found_title_from_keyword = True
             break
     
     if not found_title_from_keyword:
         # 日時情報などを取り除いた残りのテキストをタイトルにする
-        cleaned_text = re.sub(r'(\d{4}[年/]\d{1,2}[/\-月]\d{1,2}日?|\d{1,2}[/\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日|今日|明日|明後日|昨日|一昨日|\d{1,2}:\d{2}(?:[APap][Mm])?|\d{1,2}時\d{2}分?|\d{1,2}時|\d{1,2}[/\-月]\d{1,2}日?~?\d{1,2}[/\-月]\d{1,2}日?\s*\d{1,2}:\d{2}~?\d{1,2}:\d{2})', '', text_content)
-        cleaned_text = cleaned_text.replace('\n', ' ').strip()
+        # cleaned_text_for_title は既に日時情報をかなり取り除いているはず
+        cleaned_text = cleaned_text_for_title.replace('\n', ' ').strip()
         if cleaned_text:
             title = cleaned_text[:100] + '...' if len(cleaned_text) > 100 else cleaned_text
         else:
-            title = "クリップボードからのイベント"
+            title = "クリップボードからのイベント" # 何も残らなかった場合
 
     # 5. 説明 (残りのテキスト全て、または特定の情報)
     description = text_content # 全体を説明とする
@@ -214,7 +252,6 @@ def parse_event_from_text(text_content):
         location = location_match.group(2).strip()
 
     return title, start_dt, duration, description, location
-
 #webアプリのルートを定義
 
 #メインページ（入力フォーム)
@@ -258,7 +295,7 @@ def generate_ical():
         return "テキストが入力されてません",400
     
     try:
-        # ここを修正します！ duration を受け取る変数を追加
+        # duration を受け取る変数を追加
         title, start_dt, duration_str, description, location = parse_event_from_text(event_text)
 
         cal= Calendar()
